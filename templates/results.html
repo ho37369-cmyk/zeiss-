@@ -1,0 +1,57 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>计数结果 - Zeiss CZI 自动细胞计数</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="header">
+        <h1>计数结果</h1>
+        <p>任务 {{ task_id }}</p>
+    </div>
+    <div class="container">
+
+        <div class="actions">
+            <a href="/download_zip/{{ task_id }}" class="btn btn-primary">下载标注图 (ZIP)</a>
+            {% if excel_file %}<a href="/download/{{ task_id }}/{{ excel_file }}" class="btn btn-primary">下载 Excel 报告</a>{% endif %}
+            <a href="/" class="btn btn-secondary">返回首页</a>
+        </div>
+
+        {% if errors %}
+        <div class="error-box">
+            <strong>处理过程中有以下错误：</strong><br>
+            {% for e in errors %}
+                {{ e }}<br>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <div class="results-gallery">
+            {% for r in results %}
+            <div class="result-card">
+                <a href="/download/{{ task_id }}/{{ r.annotated_file }}" target="_blank">
+                    <img src="/download/{{ task_id }}/{{ r.annotated_file }}" alt="{{ r.filename }} {{ r.scene }}">
+                </a>
+                <div class="result-card-body">
+                    <div class="filename">{{ r.filename }} {% if r.scene != 'Scene0' %}({{ r.scene }}){% endif %}</div>
+                    <div class="stats">
+                        总细胞: <strong>{{ r.total }}</strong><br>
+                        <span class="live">活细胞: {{ r.live }}</span><br>
+                        {% if r.has_dead %}<span class="dead">死细胞: {{ r.dead }}</span><br>{% endif %}
+                        存活率: {{ "%.1f"|format(r.viability) }}%
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        {% if not results %}
+        <p style="text-align:center;color:#999;margin:40px 0;">无有效结果</p>
+        {% endif %}
+
+    </div>
+</body>
+</html>
+

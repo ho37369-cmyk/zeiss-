@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zeiss CZI 自动细胞计数</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body ondragover="event.preventDefault();event.stopPropagation();" ondrop="event.preventDefault();event.stopPropagation();">
+    <div class="header">
+        <h1>Zeiss CZI 自动细胞计数</h1>
+        <p>拖拽 .czi 文件或文件夹 — 自动分析明场/荧光细胞图 — 一键批量出结果</p>
+    </div>
+    <div class="container">
+
+        <!-- Step 1: Upload -->
+        <div id="step-upload">
+            <div class="drop-zone" id="dropZone">
+                <div class="drop-zone-icon">+</div>
+                <div class="drop-zone-text">拖拽 .czi 文件或文件夹到这里，或点击下方按钮选择文件</div>
+                <div style="margin-top:18px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+                    <label id="btnSelectFiles" class="btn btn-primary" style="cursor:pointer;display:inline-block;">
+                        &#x1F4C2; 选择 .czi 文件
+                    </label>
+                    <input type="file" id="fileInput" accept=".czi" multiple style="display:none;">
+                    <span class="btn btn-secondary" id="btnPathInput" style="cursor:pointer;">粘贴路径</span>
+                </div>
+                <div class="drop-zone-hint">支持多文件、文件夹批量导入 · 蔡司原生格式直读</div>
+            </div>
+            <div id="fileList" class="file-list hidden"></div>
+            <div id="channelArea" class="hidden"></div>
+            <div id="processArea" class="hidden mt-16">
+                <button class="btn btn-primary" id="btnProcess" onclick="startProcess()">开始计数</button>
+            </div>
+        </div>
+
+        <!-- Step 2: Progress -->
+        <div id="step-progress" class="hidden">
+            <div class="progress-bar-container">
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" id="progressFill" style="width:0%"></div>
+                </div>
+                <div class="progress-text" id="progressText">正在处理...</div>
+            </div>
+        </div>
+
+        <!-- Step 3: Results -->
+        <div id="step-results" class="hidden"></div>
+
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

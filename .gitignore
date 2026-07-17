@@ -1,0 +1,34 @@
+# Build output (PyInstaller)
+CellCounter/
+
+# Uploaded files and generated outputs
+output/
+
+# Python bytecode cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment & secrets
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+server_log.txt
+*.log
+
+# Codex / agent config
+.agents/

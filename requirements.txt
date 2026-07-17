@@ -1,0 +1,9 @@
+﻿aicspylibczi>=3.0.0
+czifile>=2023.0.0
+Flask>=3.0.0
+opencv-python>=4.8.0
+openpyxl>=3.1.0
+scikit-image>=0.22.0
+scipy>=1.10.0
+numpy>=1.24.0
+Pillow>=10.0.0

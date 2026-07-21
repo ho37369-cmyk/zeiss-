@@ -52,7 +52,12 @@ PARAMS_FLUORESCENCE = {
 # Hoechst needs one peak per nucleus, while PI needs broad smoothing so
 # apoptotic fragments do not become separate dead-cell candidates.
 PARAMS_NUCLEI = {
-    "smooth_sigma": 4.0,
+    # A 4-pixel blur made adjacent, in-focus nuclei share one broad maximum.
+    # At the native acquisition scale the neighbouring optical halos in a
+    # doublet are typically 9--12 pixels apart, so use a smaller blur and let
+    # the watershed split them at their genuine valley instead of merging
+    # them before peak detection.
+    "smooth_sigma": 2.5,
     "peak_min_distance": 6,
     "peak_background_mad": 2.5,
     "min_peak_intensity": 5.0,

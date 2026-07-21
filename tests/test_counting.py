@@ -62,6 +62,16 @@ class CalibratedCountingTests(unittest.TestCase):
         self.assertEqual(result["total"], 3)
         self.assertEqual(result["labels"].max(), 3)
 
+    def test_close_optical_halos_remain_separate_cells(self):
+        """Neighbouring 9--12 px nuclei must not collapse into one peak."""
+        yy, xx = np.mgrid[:100, :100]
+        image = np.zeros((100, 100), dtype=np.float32)
+        for y, x in [(50, 40), (50, 51), (50, 62)]:
+            image += 180 * np.exp(-((yy-y)**2 + (xx-x)**2) / (2 * 3**2))
+        result = count_cells(np.clip(image, 0, 255).astype(np.uint8),
+                             "fluorescence", role="total")
+        self.assertEqual(result["total"], 3)
+
     def test_dead_fragments_are_merged_before_nucleus_matching(self):
         yy, xx = np.mgrid[:100, :100]
         image = np.zeros((100, 100), dtype=np.float32)

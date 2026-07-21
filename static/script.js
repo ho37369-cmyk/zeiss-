@@ -1,6 +1,6 @@
 // Zeiss CZI Automatic Cell Counter — Frontend
 let uploadedFiles = []; // { filepath, filename, scenes, channels, previews, error? }
-let channelSelections = {}; // { filepath: { live_channel, dead_channel } }
+let channelSelections = {}; // { filepath: { channels_info } }
 
 // ========== Drag & Drop ==========
 
@@ -189,41 +189,16 @@ function renderFileList(files) {
             if (f.scenes.length > 1) break; // Only show first scene preview
         }
 
-        // Selectors
-        html += '<div style="display:flex;gap:12px;margin-top:10px;flex-wrap:wrap;">';
-        html += '<label style="font-size:13px;">活细胞通道: ';
-        html += '<select class="channel-select" onchange="updateSelection(\'' + escapeAttr(f.filepath) + '\', \'live\', this.value)">';
-        for (const ch of f.channels) {
-            const selected = ch.channel_type === 'brightfield' || ch.index === 0 ? 'selected' : '';
-            html += '<option value="' + ch.index + '" ' + selected + '>' + ch.name + '</option>';
-        }
-        html += '</select></label>';
-
-        html += '<label style="font-size:13px;">死细胞通道 (可选): ';
-        html += '<select class="channel-select" onchange="updateSelection(\'' + escapeAttr(f.filepath) + '\', \'dead\', this.value)">';
-        html += '<option value="">— 不做死活区分 —</option>';
-        for (const ch of f.channels) {
-            // Suggest PI/DAPI/Tritc as default dead channel
-            const isDead = ch.dye === 'tritc' || ch.dye === 'dapi' || ch.dye === 'cy5';
-            const selected = isDead ? 'selected' : '';
-            html += '<option value="' + ch.index + '" ' + selected + '>' + ch.name + '</option>';
-        }
-        html += '</select></label>';
-        html += '</div>';
         html += '</div>';
     }
 
     fileList.innerHTML = html;
 
-    // Initialize selections
+    // Store file info — all channels will be processed automatically
     for (const f of files) {
         if (f.error) continue;
-        const liveIdx = f.channels.find(c => c.channel_type === 'brightfield' || c.index === 0);
-        const deadIdx = f.channels.find(c => c.dye === 'tritc' || c.dye === 'dapi' || c.dye === 'cy5');
         channelSelections[f.filepath] = {
             filepath: f.filepath,
-            live_channel: liveIdx ? liveIdx.index : 0,
-            dead_channel: deadIdx ? deadIdx.index : null,
             channels_info: f.channels,
         };
     }
@@ -232,15 +207,6 @@ function renderFileList(files) {
     document.getElementById('processArea').classList.remove('hidden');
 }
 
-function updateSelection(filepath, type, value) {
-    const sel = channelSelections[filepath] || { filepath, channels_info: [] };
-    if (type === 'live') {
-        sel.live_channel = parseInt(value);
-    } else {
-        sel.dead_channel = value ? parseInt(value) : null;
-    }
-    channelSelections[filepath] = sel;
-}
 
 function escapeId(str) {
     return str.replace(/[^a-zA-Z0-9]/g, '_');
@@ -252,7 +218,28 @@ function escapeAttr(str) {
 
 // ========== Processing ==========
 async function startProcess() {
-    const selections = Object.values(channelSelections);
+    // Prefer the classifier's calibrated dense nuclear channel for all cells;
+    // brightfield remains the fallback when no such channel is available.
+    const selections = Object.values(channelSelections).map(s => {
+        const allChs = (s.channels_info || []).slice().sort((a, b) => a.index - b.index);
+        const brightfieldChs = (s.channels_info || []).filter(
+            ch => ch.channel_type === 'brightfield'
+        ).sort((a, b) => a.index - b.index);
+        const fluoChs = (s.channels_info || []).filter(
+            ch => ch.channel_type !== 'brightfield'
+        ).sort((a, b) => a.index - b.index);
+        const recommendedTotal = allChs.find(ch => ch.role === 'total');
+        const recommendedDead = fluoChs.find(ch => ch.role === 'dead');
+        const totalCh = (recommendedTotal || brightfieldChs[0] || fluoChs[0]);
+        const deadCh = recommendedDead || fluoChs[0];
+        return {
+            ...s,
+            total_channel: totalCh ? totalCh.index : 0,
+            // Kept for compatibility with a task submitted by an older page.
+            live_channel: totalCh ? totalCh.index : 0,
+            dead_channel: deadCh ? deadCh.index : undefined,
+        };
+    });
     if (selections.length === 0) {
         alert('请先添加文件');
         return;
@@ -311,7 +298,7 @@ function showResults(taskId, data) {
     resultsDiv.classList.remove('hidden');
 
     let html = '<div class="actions">';
-    html += '<a href="/download_zip/' + taskId + '" class="btn btn-primary">下载标注图 (ZIP)</a>';
+    html += '<a href="/download_zip/' + taskId + '" class="btn btn-primary">下载全部结果 (ZIP)</a>';
     if (data.excel_file) {
         html += '<a href="/download/' + taskId + '/' + data.excel_file + '" class="btn btn-primary">下载 Excel 报告</a>';
     }
@@ -327,23 +314,18 @@ function showResults(taskId, data) {
     }
 
     if (data.results && data.results.length > 0) {
+        const first = data.results[0];
+        const total = data.results.reduce((sum, r) => sum + r.total, 0);
+        const dead = data.results.reduce((sum, r) => sum + r.dead, 0);
+        const allUrl = '/download/' + taskId + '/' + encodeURIComponent(first.annotated_file);
+        const deadUrl = '/download/' + taskId + '/' + encodeURIComponent(first.dead_annotated_file);
         html += '<div class="results-gallery">';
-        for (const r of data.results) {
-            const sceneLabel = r.scene !== 'Scene0' ? ' (' + r.scene + ')' : '';
-            html += '<div class="result-card">';
-            html += '<a href="/download/' + taskId + '/' + r.annotated_file + '" target="_blank">';
-            html += '<img src="/download/' + taskId + '/' + r.annotated_file + '">';
-            html += '</a>';
-            html += '<div class="result-card-body">';
-            html += '<div class="filename">' + r.filename + sceneLabel + '</div>';
-            html += '<div class="stats">总细胞: <strong>' + r.total + '</strong><br>';
-            html += '<span class="live">活细胞: ' + r.live + '</span><br>';
-            if (r.has_dead) {
-                html += '<span class="dead">死细胞: ' + r.dead + '</span><br>';
-            }
-            html += '存活率: ' + r.viability.toFixed(1) + '%';
-            html += '</div></div></div>';
-        }
+        html += '<div class="result-card"><a href="' + allUrl + '" target="_blank"><img src="' + allUrl + '"></a>';
+        html += '<div class="result-card-body"><div class="filename">所有细胞标识图</div>';
+        html += '<div class="stats">所有细胞数: <strong>' + total + '</strong></div></div></div>';
+        html += '<div class="result-card dead-card"><a href="' + deadUrl + '" target="_blank"><img src="' + deadUrl + '"></a>';
+        html += '<div class="result-card-body"><div class="filename">死细胞标识图</div>';
+        html += '<div class="stats">死细胞数: <strong style="color:#c62828;">' + dead + '</strong></div></div></div>';
         html += '</div>';
     } else {
         html += '<p style="text-align:center;color:#999;margin:40px 0;">无有效结果</p>';

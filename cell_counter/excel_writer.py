@@ -1,8 +1,6 @@
-﻿"""
-Excel spreadsheet writer for cell counting results.
-"""
+"""Write the compact cell-count statistics workbook."""
 
-import math
+import json
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -17,70 +15,62 @@ BORDER = Border(
 CENTER = Alignment(horizontal="center", vertical="center")
 
 
-def _safe_val(v, default=0):
-    """Ensure a value is safe for Excel (no NaN, no Inf)."""
-    if v is None:
+def _excel_value(value, default=""):
+    """Convert legacy/numpy/container values into values accepted by Excel."""
+    if value is None:
         return default
-    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-        return default
-    return v
+    if hasattr(value, "item"):
+        try:
+            value = value.item()
+        except (ValueError, TypeError):
+            pass
+    if isinstance(value, (list, tuple, set, dict)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _count_value(value):
+    """Return a safe integer count even when a legacy task supplied bad data."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def write_excel(filepath, results):
-    """Write cell counting results to an Excel file.
-
-    Args:
-        filepath: Output .xlsx file path
-        results: list of dicts, each with:
-            filename, scene, total, live, dead, viability, has_dead, cell_details (optional)
-    """
+    """Create one sheet containing the requested total/dead cell counts."""
     wb = openpyxl.Workbook()
-
-    # Sheet 1: Summary
     ws = wb.active
-    ws.title = "Summary"
-    headers = ["文件名", "Scene", "总细胞数", "活细胞数", "死细胞数", "存活率(%)"]
+    ws.title = "细胞统计"
+    headers = ["文件名", "视野", "所有细胞数", "死细胞数"]
     _write_header(ws, headers)
 
     for ri, r in enumerate(results, start=2):
         vals = [
-            r["filename"], r["scene"],
-            _safe_val(r["total"], 0), _safe_val(r["live"], 0),
-            _safe_val(r["dead"], 0), round(_safe_val(r["viability"], 0), 1),
+            _excel_value(r.get("filename", "")),
+            _excel_value(r.get("scene", "")),
+            _count_value(r.get("total")),
+            _count_value(r.get("dead")),
         ]
         for ci, v in enumerate(vals, start=1):
             cell = ws.cell(row=ri, column=ci, value=v)
             cell.border = BORDER
             cell.alignment = CENTER
 
+    if len(results) > 1:
+        total_row = len(results) + 2
+        totals = ["合计", "", sum(_count_value(r.get("total")) for r in results),
+                  sum(_count_value(r.get("dead")) for r in results)]
+        for ci, value in enumerate(totals, start=1):
+            cell = ws.cell(row=total_row, column=ci, value=value)
+            cell.font = Font(name="Calibri", bold=True)
+            cell.border = BORDER
+            cell.alignment = CENTER
+
     _auto_fit(ws, headers)
-
-    # Sheet 2: Detail
-    has_detail = any(r.get("cell_details") for r in results)
-    if has_detail:
-        ws2 = wb.create_sheet("Detail")
-        dheaders = ["文件名", "Scene", "细胞编号", "面积(px\xb2)", "圆形度", "平均强度", "是否死细胞"]
-        _write_header(ws2, dheaders)
-
-        ri = 2
-        for r in results:
-            for cd in r.get("cell_details", []):
-                vals = [
-                    r["filename"], r["scene"],
-                    _safe_val(cd.get("label"), ""),
-                    _safe_val(cd.get("area"), ""),
-                    round(_safe_val(cd.get("circularity"), 0), 3),
-                    round(_safe_val(cd.get("mean_intensity"), 0), 1),
-                    "是" if cd.get("is_dead") else "否",
-                ]
-                for ci, v in enumerate(vals, start=1):
-                    cell = ws2.cell(row=ri, column=ci, value=v)
-                    cell.border = BORDER
-                    cell.alignment = CENTER
-                ri += 1
-
-        _auto_fit(ws2, dheaders)
-
+    ws.freeze_panes = "A2"
     wb.save(filepath)
 
 

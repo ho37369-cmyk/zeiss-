@@ -14,7 +14,7 @@
     <div class="container">
 
         <div class="actions">
-            <a href="/download_zip/{{ task_id }}" class="btn btn-primary">下载标注图 (ZIP)</a>
+            <a href="/download_zip/{{ task_id }}" class="btn btn-primary">下载全部结果 (ZIP)</a>
             {% if excel_file %}<a href="/download/{{ task_id }}/{{ excel_file }}" class="btn btn-primary">下载 Excel 报告</a>{% endif %}
             <a href="/" class="btn btn-secondary">返回首页</a>
         </div>
@@ -28,24 +28,23 @@
         </div>
         {% endif %}
 
+        {% if results %}
+        {% set first = results[0] %}
         <div class="results-gallery">
-            {% for r in results %}
             <div class="result-card">
-                <a href="/download/{{ task_id }}/{{ r.annotated_file }}" target="_blank">
-                    <img src="/download/{{ task_id }}/{{ r.annotated_file }}" alt="{{ r.filename }} {{ r.scene }}">
+                <a href="/download/{{ task_id }}/{{ first.annotated_file }}" target="_blank">
+                    <img src="/download/{{ task_id }}/{{ first.annotated_file }}" alt="所有细胞标识图">
                 </a>
-                <div class="result-card-body">
-                    <div class="filename">{{ r.filename }} {% if r.scene != 'Scene0' %}({{ r.scene }}){% endif %}</div>
-                    <div class="stats">
-                        总细胞: <strong>{{ r.total }}</strong><br>
-                        <span class="live">活细胞: {{ r.live }}</span><br>
-                        {% if r.has_dead %}<span class="dead">死细胞: {{ r.dead }}</span><br>{% endif %}
-                        存活率: {{ "%.1f"|format(r.viability) }}%
-                    </div>
-                </div>
+                <div class="result-card-body"><div class="filename">所有细胞标识图</div></div>
             </div>
-            {% endfor %}
+            <div class="result-card dead-card">
+                <a href="/download/{{ task_id }}/{{ first.dead_annotated_file }}" target="_blank">
+                    <img src="/download/{{ task_id }}/{{ first.dead_annotated_file }}" alt="死细胞标识图">
+                </a>
+                <div class="result-card-body"><div class="filename">死细胞标识图</div></div>
+            </div>
         </div>
+        {% endif %}
 
         {% if not results %}
         <p style="text-align:center;color:#999;margin:40px 0;">无有效结果</p>

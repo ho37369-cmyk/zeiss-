@@ -11,7 +11,7 @@ DEAD_COLOR = (0, 0, 220)
 TOTAL_COLOR = (220, 200, 0)
 
 
-def annotate_image(image, total_result, dead_mask=None):
+def annotate_image(image, total_result, dead_mask=None, dead_labels=None):
     """Draw cell annotations on the original image.
 
     Args:
@@ -30,8 +30,8 @@ def annotate_image(image, total_result, dead_mask=None):
     labels = total_result.get('labels')
     props = total_result.get('props', [])
 
-    dead_labels = set()
-    if dead_mask is not None and labels is not None:
+    dead_labels = set(dead_labels or [])
+    if not dead_labels and dead_mask is not None and labels is not None:
         unique = np.unique(labels[dead_mask > 0])
         for lbl in unique:
             if lbl > 0:
@@ -86,3 +86,78 @@ def create_dead_mask(dead_result):
     if labels is None:
         return None
     return labels > 0
+
+
+def match_dead_cells(total_result, dead_result, min_overlap_fraction=0.10,
+                     max_gap_pixels=8, max_peak_distance=12):
+    """Match dead-stain detections to accepted total-cell objects.
+
+    A dead detection is counted only when a meaningful portion overlaps an
+    accepted total cell.  A small spatial tolerance accounts for channel
+    registration and for brightfield masks stopping at the inner edge of a
+    phase halo.  This rejects isolated background spots and prevents multiple
+    dead blobs on one cell from increasing the count twice.
+    """
+    if not total_result or not dead_result:
+        return set()
+    total_labels = total_result.get("labels")
+    dead_labels = dead_result.get("labels")
+    if total_labels is None or dead_labels is None or total_labels.shape != dead_labels.shape:
+        return set()
+
+    valid_total = {int(p["label"]) for p in total_result.get("props", [])}
+    total_props = total_result.get("props", [])
+    dead_props = dead_result.get("props", [])
+
+    # The calibrated Hoechst/PI pipeline records the detection centre for each
+    # object.  Match those centres directly so watershed regions extending into
+    # dim background cannot create false PI associations.  Multiple PI peaks
+    # mapping to one Hoechst nucleus are deliberately counted once.
+    if (total_props and dead_props
+            and all("peak" in p for p in total_props)
+            and all("peak" in p for p in dead_props)):
+        total_points = np.asarray([p["peak"] for p in total_props], dtype=float)
+        matches = set()
+        max_distance_sq = float(max_peak_distance) ** 2
+        for dead_prop in dead_props:
+            point = np.asarray(dead_prop["peak"], dtype=float)
+            distances_sq = np.sum((total_points - point) ** 2, axis=1)
+            nearest = int(np.argmin(distances_sq))
+            if distances_sq[nearest] <= max_distance_sq:
+                matches.add(int(total_props[nearest]["label"]))
+        return matches
+
+    matches = set()
+    for dead_prop in dead_props:
+        region = dead_labels == dead_prop["label"]
+        region_area = int(np.count_nonzero(region))
+        if region_area == 0:
+            continue
+        candidates, counts = np.unique(total_labels[region], return_counts=True)
+        best_label = 0
+        best_count = 0
+        for label, count in zip(candidates, counts):
+            label = int(label)
+            if label in valid_total and int(count) > best_count:
+                best_label, best_count = label, int(count)
+        required = max(3, int(np.ceil(region_area * min_overlap_fraction)))
+        if not best_label or best_count < required:
+            # Fluorescence and transmitted-light acquisitions can differ by a
+            # few pixels.  Expand only already-qualified dead-stain objects;
+            # the intensity/shape filtering happens before this matcher.
+            kernel_size = max_gap_pixels * 2 + 1
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            nearby = cv2.dilate(region.astype(np.uint8), kernel) > 0
+            candidates, counts = np.unique(
+                total_labels[nearby], return_counts=True)
+            best_label = 0
+            best_count = 0
+            for label, count in zip(candidates, counts):
+                label = int(label)
+                if label in valid_total and int(count) > best_count:
+                    best_label, best_count = label, int(count)
+            required = 3
+        if best_label and best_count >= required:
+            matches.add(best_label)
+    return matches

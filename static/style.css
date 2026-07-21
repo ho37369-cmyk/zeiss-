@@ -275,3 +275,15 @@ body {
     background: #fff5f5 !important;
     font-weight: bold;
 }
+
+/* Dead channel card */
+.result-card.dead-card {
+    border-left: 3px solid #e53935;
+}
+
+.dead-stats {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed #ffcdd2;
+    font-size: 12px;
+}

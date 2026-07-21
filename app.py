@@ -1,4 +1,4 @@
-import os, sys, json, uuid, threading, zipfile, io, time, base64, webbrowser
+import os, sys, json, uuid, threading, zipfile, io, time, base64, webbrowser, tempfile
 from datetime import datetime
 from pathlib import Path
 import cv2
@@ -14,15 +14,22 @@ else:
     APP_DIR = BUNDLE_DIR
 
 sys.path.insert(0, str(BUNDLE_DIR))
-from cell_counter import read_czi, classify_channels, count_cells, annotate_image, create_dead_mask, write_excel
+from cell_counter import (read_czi, classify_channels, count_cells, annotate_image,
+                          create_dead_mask, match_dead_cells, write_excel)
 
 app = Flask(__name__,
     template_folder=str(BUNDLE_DIR / 'templates'),
     static_folder=str(BUNDLE_DIR / 'static'))
 app.secret_key = os.urandom(24)
 
-OUTPUT_DIR = APP_DIR / 'output'
+OUTPUT_DIR = APP_DIR / 'analysis_results'
 OUTPUT_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR = Path(tempfile.gettempdir()) / 'cell_counter_uploads'
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+EXCEL_FILENAME = "细胞统计.xlsx"
+ALL_CELLS_FILENAME = "所有细胞标识图.png"
+DEAD_CELLS_FILENAME = "死细胞标识图.png"
 
 # In-memory task store
 tasks = {}
@@ -30,7 +37,7 @@ tasks_lock = threading.Lock()
 
 
 def new_task_id():
-    return uuid.uuid4().hex[:12]
+    return datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
 
 
 @app.route('/')
@@ -81,7 +88,8 @@ def upload_files():
                 'filename': cf.name,
                 'scenes': list(data['scenes'].keys()),
                 'channels': [
-                    {'index': c.index, 'name': c.name, 'channel_type': c.channel_type, 'dye': c.dye}
+                    {'index': c.index, 'name': c.name, 'channel_type': c.channel_type,
+                     'dye': c.dye, 'role': c.role}
                     for c in channels
                 ],
                 'previews': previews,
@@ -115,115 +123,140 @@ def start_processing():
         }
 
     def worker():
-        with tasks_lock:
-            t = tasks[task_id]
-        output_dir = OUTPUT_DIR / task_id
-        output_dir.mkdir(parents=True, exist_ok=True)
-        annotated_dir = output_dir / 'annotated'
-        annotated_dir.mkdir(exist_ok=True)
+        try:
+            with tasks_lock:
+                t = tasks[task_id]
+            output_dir = OUTPUT_DIR / task_id
+            output_dir.mkdir(parents=True, exist_ok=True)
+            all_cell_panels = []
+            dead_cell_panels = []
 
-        for i, sel in enumerate(selections):
-            filepath = sel['filepath']
-            live_ch = sel.get('live_channel', 0)
-            dead_ch = sel.get('dead_channel')
-            filename = Path(filepath).name
+            for i, sel in enumerate(selections):
+                filepath = sel["filepath"]
+                total_ch = sel.get("total_channel", sel.get("live_channel", 0))
+                dead_ch = sel.get("dead_channel")
+                filename = Path(filepath).name
 
-            try:
-                czi_data = read_czi(filepath)
-                for s_name, s_data in czi_data['scenes'].items():
-                    # Find live and dead channel images
-                    live_img = None
-                    dead_img = None
-                    for ch in s_data['channels']:
-                        if ch['index'] == live_ch:
-                            live_img = ch['image']
-                        if dead_ch is not None and ch['index'] == dead_ch:
-                            dead_img = ch['image']
+                try:
+                    czi_data = read_czi(filepath)
+                    for s_name, s_data in czi_data["scenes"].items():
+                        total_img = None
+                        dead_img = None
+                        for ch in s_data["channels"]:
+                            if ch["index"] == total_ch:
+                                total_img = ch["image"]
+                            if dead_ch is not None and ch["index"] == dead_ch:
+                                dead_img = ch["image"]
 
-                    if live_img is None:
-                        t['errors'].append(f'{filename} - {s_name}: Live channel not found')
-                        continue
+                        if total_img is None:
+                            with tasks_lock:
+                                t["errors"].append(f"{filename} - {s_name}: total-cell channel not found")
+                            continue
 
-                    # Count cells
-                    ch_info = None
-                    for c in sel.get('channels_info', []):
-                        if c['index'] == live_ch:
-                            ch_info = c
-                            break
-                    ch_type = (ch_info or {}).get('channel_type', 'fluorescence')
-                    total_result = count_cells(live_img, ch_type)
+                        ch_info = None
+                        for c in sel.get("channels_info", []):
+                            if c["index"] == total_ch:
+                                ch_info = c
+                                break
+                        ch_type = (ch_info or {}).get("channel_type", "fluorescence")
+                        total_result = count_cells(
+                            total_img, ch_type,
+                            dye=(ch_info or {}).get("dye"), role="total")
 
-                    # Dead cell detection
-                    dead_mask = None
-                    if dead_ch is not None and dead_img is not None:
-                        dead_result = count_cells(dead_img, 'fluorescence')
-                        dead_mask = create_dead_mask(dead_result)
+                        dead_mask = None
+                        dead_result = None
+                        if dead_ch is not None and dead_img is not None:
+                            dead_result = count_cells(
+                                dead_img, "fluorescence", role="dead")
+                            dead_mask = create_dead_mask(dead_result)
 
-                    # Annotate
-                    annotated = annotate_image(live_img, total_result, dead_mask)
+                        dead_labels = match_dead_cells(total_result, dead_result)
+                        annotated = annotate_image(
+                            total_img, total_result, dead_mask, dead_labels=dead_labels)
 
-                    # Determine counts
-                    dead_count = 0
-                    if dead_mask is not None and total_result['labels'] is not None:
-                        unique = np.unique(total_result['labels'][dead_mask > 0])
-                        dead_count = int((unique > 0).sum())
-                    live_count = total_result['total'] - dead_count
-                    viability = (live_count / total_result['total'] * 100) if total_result['total'] > 0 else 0
+                        dead_count = len(dead_labels)
+                        live_count = total_result["total"] - dead_count
+                        viability = (live_count / total_result["total"] * 100) if total_result["total"] > 0 else 0
 
-                    # Build cell details
-                    cell_details = []
-                    dead_labels = set()
-                    if dead_mask is not None and total_result['labels'] is not None:
-                        unique = np.unique(total_result['labels'][dead_mask > 0])
-                        dead_labels = set(int(l) for l in unique if l > 0)
-                    for prop in total_result['props']:
-                        cell_details.append({
-                            'label': prop['label'],
-                            'area': prop['area'],
-                            'circularity': prop['circularity'],
-                            'mean_intensity': prop['mean_intensity'],
-                            'is_dead': prop['label'] in dead_labels,
-                        })
+                        cell_details = []
+                        for prop in total_result["props"]:
+                            cell_details.append({
+                                "label": prop["label"],
+                                "area": prop["area"],
+                                "circularity": prop["circularity"],
+                                "mean_intensity": prop["mean_intensity"],
+                                "is_dead": prop["label"] in dead_labels,
+                            })
 
-                    # Save annotated image
-                    scene_suffix = f'_{s_name}' if s_name != 'Scene0' else ''
-                    safe_fn = Path(filename).stem + scene_suffix + '.png'
-                    out_path = annotated_dir / safe_fn
-                    cv2.imwrite(str(out_path), annotated)
+                        panel_name = f"{filename} - {s_name}"
+                        all_cell_panels.append((panel_name, annotated))
 
-                    result_item = {
-                        'filename': filename,
-                        'scene': s_name,
-                        'total': total_result['total'],
-                        'live': live_count,
-                        'dead': dead_count,
-                        'viability': viability,
-                        'has_dead': dead_ch is not None,
-                        'annotated_file': str(out_path.relative_to(output_dir).as_posix()),
-                        'cell_details': cell_details,
-                    }
-                    t['results'].append(result_item)
+                        result_item = {
+                            "filename": filename,
+                            "scene": s_name,
+                            "channel_name": (ch_info or {}).get("name", "Total-cell channel"),
+                            "channel_index": total_ch,
+                            "channel_type": ch_type,
+                            "dye": (ch_info or {}).get("dye", ""),
+                            "total": total_result["total"],
+                            "live": live_count,
+                            "dead": dead_count,
+                            "viability": viability,
+                            "has_dead": dead_ch is not None,
+                            "annotated_file": ALL_CELLS_FILENAME,
+                            "dead_annotated_file": DEAD_CELLS_FILENAME,
+                            "cell_details": cell_details,
+                        }
+                        with tasks_lock:
+                            t["results"].append(result_item)
 
-            except Exception as e:
-                t['errors'].append(f'{filename}: {str(e)}')
+                        dead_background = dead_img if dead_img is not None else total_img
+                        dead_annotated = annotate_image(
+                            dead_background, total_result, dead_labels=dead_labels)
+                        dead_cell_panels.append((panel_name, dead_annotated))
+
+                except Exception as e:
+                    with tasks_lock:
+                        t["errors"].append(f"{filename}: {str(e)}")
+
+                with tasks_lock:
+                    t["done"] = i + 1
+                    t["progress"] = int((i + 1) / len(selections) * 100)
+
+            # A timestamp folder always contains exactly these three outputs.
+            with tasks_lock:
+                excel_path = output_dir / EXCEL_FILENAME
+                try:
+                    sorted_results = sorted(t["results"], key=lambda x: (x["filename"], x["scene"]))
+                    _write_png(output_dir / ALL_CELLS_FILENAME,
+                               _build_contact_sheet(all_cell_panels))
+                    _write_png(output_dir / DEAD_CELLS_FILENAME,
+                               _build_contact_sheet(dead_cell_panels))
+                    write_excel(str(excel_path), sorted_results)
+                    t["excel_file"] = EXCEL_FILENAME
+                except Exception as e:
+                    import traceback
+                    import sys
+                    tb = traceback.format_exc()
+                    t["errors"].append(f"Excel error: {str(e)}\n{tb}")
+                    t["excel_file"] = ""
+                    print(f"[ExcelError] {tb}", file=sys.stderr, flush=True)
 
             with tasks_lock:
-                t['done'] = i + 1
-                t['progress'] = int((i + 1) / len(selections) * 100)
+                t["status"] = "complete"
+                t["progress"] = 100
 
-        # Write Excel
-        try:
-            sorted_results = sorted(t['results'], key=lambda x: (x['filename'], x['scene']))
-            excel_path = output_dir / 'summary.xlsx'
-            write_excel(str(excel_path), sorted_results)
-            t['excel_file'] = str(excel_path.relative_to(output_dir).as_posix())
         except Exception as e:
             import traceback
+            import sys
             tb = traceback.format_exc()
-            t['errors'].append(f'Excel error: {str(e)}\\n{tb}')
+            print(f"[FatalWorkerError] {tb}", file=sys.stderr, flush=True)
+            with tasks_lock:
+                tt = tasks.get(task_id)
+                if tt is not None:
+                    tt["status"] = "error"
+                    tt["errors"].append(f"Fatal worker error: {str(e)}\n{tb}")
 
-        t['status'] = 'complete'
-        t['progress'] = 100
 
     threading.Thread(target=worker, daemon=True).start()
     return jsonify({'task_id': task_id})
@@ -289,7 +322,7 @@ def download_zip(task_id):
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        output_dir = OUTPUT_DIR / task_id / 'annotated'
+        output_dir = OUTPUT_DIR / task_id
         if output_dir.exists():
             for f in sorted(output_dir.iterdir()):
                 zf.write(str(f), arcname=f.name)
@@ -309,6 +342,46 @@ def _thumbnail(image, max_w=120, max_h=120):
     return image
 
 
+def _write_png(path, image):
+    """Write PNG data through imencode so Unicode Windows paths are reliable."""
+    ok, encoded = cv2.imencode('.png', image)
+    if not ok:
+        raise RuntimeError(f'Unable to encode output image: {Path(path).name}')
+    Path(path).write_bytes(encoded.tobytes())
+
+
+def _build_contact_sheet(panels):
+    """Build one output figure; multiple source images become a two-column grid."""
+    if not panels:
+        canvas = np.zeros((400, 800, 3), dtype=np.uint8)
+        cv2.putText(canvas, 'No valid image result', (220, 210),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (220, 220, 220), 2, cv2.LINE_AA)
+        return canvas
+    if len(panels) == 1:
+        return panels[0][1]
+
+    columns = 2
+    cell_w, image_h, title_h = 900, 675, 36
+    cell_h = image_h + title_h
+    rows = (len(panels) + columns - 1) // columns
+    sheet = np.zeros((rows * cell_h, columns * cell_w, 3), dtype=np.uint8)
+    for index, (_title, image) in enumerate(panels):
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        scale = min(cell_w / image.shape[1], image_h / image.shape[0])
+        width = max(1, int(image.shape[1] * scale))
+        height = max(1, int(image.shape[0] * scale))
+        resized = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+        row, column = divmod(index, columns)
+        x0 = column * cell_w + (cell_w - width) // 2
+        y0 = row * cell_h + title_h + (image_h - height) // 2
+        sheet[y0:y0 + height, x0:x0 + width] = resized
+        cv2.putText(sheet, f'Image {index + 1}',
+                    (column * cell_w + 12, row * cell_h + 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 1, cv2.LINE_AA)
+    return sheet
+
+
 @app.route('/upload_file', methods=['POST'])
 def upload_file():
     if 'files' not in request.files:
@@ -318,8 +391,7 @@ def upload_file():
     if not files:
         return jsonify({'error': 'No files provided'}), 400
 
-    upload_dir = OUTPUT_DIR / 'uploads'
-    upload_dir.mkdir(parents=True, exist_ok=True)
+    upload_dir = UPLOAD_DIR
 
     saved_paths = []
     for f in files:
@@ -361,7 +433,8 @@ def upload_file():
                 'filename': cf.name,
                 'scenes': list(data['scenes'].keys()),
                 'channels': [
-                    {'index': c.index, 'name': c.name, 'channel_type': c.channel_type, 'dye': c.dye}
+                    {'index': c.index, 'name': c.name, 'channel_type': c.channel_type,
+                     'dye': c.dye, 'role': c.role}
                     for c in channels
                 ],
                 'previews': previews,
@@ -376,19 +449,18 @@ def upload_file():
     return jsonify({'files': analyzed})
 
 if __name__ == '__main__':
-    # Auto-find available port
+    # Use one fixed port.  Silently moving to another port allowed several old
+    # server versions to stay alive and made browser requests hit stale code.
     import socket
     port = 5000
-    for attempt in range(10):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind(('127.0.0.1', port))
-            sock.close()
-            break
-        except OSError:
-            sock.close()
-            port += 1
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(('127.0.0.1', port))
+    except OSError:
+        print('ERROR: CellCounter is already running on http://127.0.0.1:5000')
+        sys.exit(1)
+    finally:
+        sock.close()
     url = f'http://127.0.0.1:{port}'
     print(f' * Starting server on {url}')
     # Auto-open browser after a short delay

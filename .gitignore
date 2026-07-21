@@ -32,3 +32,20 @@ server_log.txt
 
 # Codex / agent config
 .agents/
+# Temporary / debug files
+__err.txt
+__out.txt
+_fix.py
+_test_excel*.xlsx
+
+# Generated analysis output
+analysis_results/
+
+# Calibration / test images
+calibration_*.jpg
+
+# Personal notes
+progress.md
+
+# Large data files (CZI images, etc.)
+数据/

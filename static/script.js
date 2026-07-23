@@ -143,6 +143,9 @@ async function addPaths(paths) {
 // ========== File List & Channel Selection ==========
 function renderFileList(files) {
     uploadedFiles = files;
+    // A rendered list is one batch. Avoid retaining files from a previous
+    // selection when the user opens another batch without refreshing.
+    channelSelections = {};
     const fileList = document.getElementById('fileList');
     fileList.classList.remove('hidden');
 
@@ -314,24 +317,41 @@ function showResults(taskId, data) {
     }
 
     if (data.results && data.results.length > 0) {
-        const first = data.results[0];
-        const total = data.results.reduce((sum, r) => sum + r.total, 0);
-        const dead = data.results.reduce((sum, r) => sum + r.dead, 0);
-        const allUrl = '/download/' + taskId + '/' + encodeURIComponent(first.annotated_file);
-        const deadUrl = '/download/' + taskId + '/' + encodeURIComponent(first.dead_annotated_file);
+        const fileResults = [];
+        const byAnnotation = new Map();
+        for (const result of data.results) {
+            let item = byAnnotation.get(result.annotated_file);
+            if (!item) {
+                item = { ...result, total: 0, dead: 0 };
+                byAnnotation.set(result.annotated_file, item);
+                fileResults.push(item);
+            }
+            item.total += Number(result.total) || 0;
+            item.dead += Number(result.dead) || 0;
+        }
         html += '<div class="results-gallery">';
-        html += '<div class="result-card"><a href="' + allUrl + '" target="_blank"><img src="' + allUrl + '"></a>';
-        html += '<div class="result-card-body"><div class="filename">所有细胞标识图</div>';
-        html += '<div class="stats">所有细胞数: <strong>' + total + '</strong></div></div></div>';
-        html += '<div class="result-card dead-card"><a href="' + deadUrl + '" target="_blank"><img src="' + deadUrl + '"></a>';
-        html += '<div class="result-card-body"><div class="filename">死细胞标识图</div>';
-        html += '<div class="stats">死细胞数: <strong style="color:#c62828;">' + dead + '</strong></div></div></div>';
+        for (const item of fileResults) {
+            const allUrl = '/download/' + taskId + '/' + encodeURIComponent(item.annotated_file);
+            const deadUrl = '/download/' + taskId + '/' + encodeURIComponent(item.dead_annotated_file);
+            html += '<div class="result-card"><a href="' + allUrl + '" target="_blank"><img src="' + allUrl + '"></a>';
+            html += '<div class="result-card-body"><div class="filename">' + escapeHtml(item.filename) + ' — 所有细胞</div>';
+            html += '<div class="stats">所有细胞数: <strong>' + item.total + '</strong></div></div></div>';
+            html += '<div class="result-card dead-card"><a href="' + deadUrl + '" target="_blank"><img src="' + deadUrl + '"></a>';
+            html += '<div class="result-card-body"><div class="filename">' + escapeHtml(item.filename) + ' — 死细胞</div>';
+            html += '<div class="stats">死细胞数: <strong style="color:#c62828;">' + item.dead + '</strong></div></div></div>';
+        }
         html += '</div>';
     } else {
         html += '<p style="text-align:center;color:#999;margin:40px 0;">无有效结果</p>';
     }
 
     resultsDiv.innerHTML = html;
+}
+
+function escapeHtml(value) {
+    const div = document.createElement('div');
+    div.textContent = String(value ?? '');
+    return div.innerHTML;
 }
 
 // ========== File Input Button ==========
@@ -379,7 +399,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // File input button wiring
     const fileInput = document.getElementById('fileInput');
+    const folderInput = document.getElementById('folderInput');
     const btnSelectFiles = document.getElementById('btnSelectFiles');
+    const btnSelectFolder = document.getElementById('btnSelectFolder');
     const btnPathInput = document.getElementById('btnPathInput');
 
     if (btnSelectFiles && fileInput) {
@@ -389,6 +411,24 @@ document.addEventListener('DOMContentLoaded', function() {
         });
         fileInput.addEventListener('change', function() {
             handleFileInput(fileInput.files);
+        });
+    }
+
+    if (btnSelectFolder && folderInput) {
+        btnSelectFolder.addEventListener('click', function(e) {
+            e.stopPropagation();
+            folderInput.click();
+        });
+        folderInput.addEventListener('change', function() {
+            const cziFiles = Array.from(folderInput.files).filter(
+                file => file.name.toLowerCase().endsWith('.czi')
+            );
+            if (cziFiles.length === 0) {
+                alert('所选文件夹中没有 CZI 文件');
+            } else {
+                handleFileInput(cziFiles);
+            }
+            folderInput.value = '';
         });
     }
 

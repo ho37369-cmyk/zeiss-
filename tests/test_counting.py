@@ -1,9 +1,13 @@
 import unittest
 import tempfile
+import time
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import openpyxl
+
+import app as web_app
 
 from cell_counter.annotator import match_dead_cells
 from cell_counter.cell_counter import _compact_labels, count_cells
@@ -206,6 +210,75 @@ class ExcelOutputTests(unittest.TestCase):
             self.assertEqual(sheet.cell(2, 3).value, 0)
             workbook.close()
 
+
+class BatchProcessingTests(unittest.TestCase):
+    def test_batch_writes_per_czi_annotations_and_one_summary_workbook(self):
+        image = np.zeros((24, 24), dtype=np.uint8)
+        czi_data = {"scenes": {"Scene0": {"channels": [
+            {"index": 0, "name": "PI", "image": image},
+            {"index": 1, "name": "Hoechst", "image": image},
+        ]}}}
+        count_result = {
+            "total": 1,
+            "labels": np.ones_like(image, dtype=np.int32),
+            "props": [{
+                "label": 1,
+                "area": 100,
+                "circularity": 0.9,
+                "mean_intensity": 120,
+            }],
+        }
+        selections = [{
+            "filepath": str(Path(root) / "same-name.czi"),
+            "total_channel": 1,
+            "dead_channel": 0,
+            "channels_info": [{
+                "index": 1,
+                "name": "Hoechst",
+                "channel_type": "fluorescence",
+                "dye": "Hoechst",
+            }],
+        } for root in ("batch-a", "batch-b")]
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(web_app, "OUTPUT_DIR", Path(directory)), \
+                patch.object(web_app, "read_czi", return_value=czi_data), \
+                patch.object(web_app, "count_cells", return_value=count_result), \
+                patch.object(web_app, "create_dead_mask", return_value=image), \
+                patch.object(web_app, "match_dead_cells", return_value={1}), \
+                patch.object(web_app, "annotate_image",
+                             return_value=np.zeros((24, 24, 3), dtype=np.uint8)):
+            response = web_app.app.test_client().post(
+                "/process", json={"selections": selections})
+            self.assertEqual(response.status_code, 200)
+            task_id = response.get_json()["task_id"]
+
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                with web_app.tasks_lock:
+                    status = web_app.tasks[task_id]["status"]
+                if status != "running":
+                    break
+                time.sleep(0.01)
+            self.assertEqual(status, "complete")
+
+            output_dir = Path(directory) / task_id
+            output_files = sorted(path.name for path in output_dir.iterdir())
+            self.assertEqual(len(output_files), 5)
+            self.assertEqual(output_files.count(web_app.EXCEL_FILENAME), 1)
+            self.assertEqual(
+                len([name for name in output_files
+                     if name.endswith(web_app.ALL_CELLS_FILENAME)]), 2)
+            self.assertEqual(
+                len([name for name in output_files
+                     if name.endswith(web_app.DEAD_CELLS_FILENAME)]), 2)
+
+            workbook = openpyxl.load_workbook(
+                output_dir / web_app.EXCEL_FILENAME, read_only=True)
+            sheet = workbook["细胞统计"]
+            self.assertEqual(sheet.max_row, 4)  # header, 2 files, total
+            self.assertEqual(sheet.cell(4, 1).value, "合计")
+            workbook.close()
 
 if __name__ == "__main__":
     unittest.main()

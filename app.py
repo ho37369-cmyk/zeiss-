@@ -1,4 +1,4 @@
-import os, sys, json, uuid, threading, zipfile, io, time, base64, webbrowser, tempfile
+import os, sys, json, threading, zipfile, io, time, base64, webbrowser, tempfile, re
 from datetime import datetime
 from pathlib import Path
 import cv2
@@ -27,7 +27,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 UPLOAD_DIR = Path(tempfile.gettempdir()) / 'cell_counter_uploads'
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-EXCEL_FILENAME = "细胞统计.xlsx"
+EXCEL_FILENAME = "细胞统计汇总.xlsx"
 ALL_CELLS_FILENAME = "所有细胞标识图.png"
 DEAD_CELLS_FILENAME = "死细胞标识图.png"
 
@@ -38,6 +38,26 @@ tasks_lock = threading.Lock()
 
 def new_task_id():
     return datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
+
+
+def _safe_output_stem(filename):
+    """Return a readable filename stem that is valid on Windows."""
+    stem = Path(filename).stem
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', stem).strip(' .')
+    return (stem or 'CZI文件')[:120]
+
+
+def _annotation_filenames(filename, used_stems):
+    """Build a unique pair of annotation filenames for one input CZI."""
+    base = _safe_output_stem(filename)
+    stem = base
+    suffix = 2
+    while stem.casefold() in used_stems:
+        stem = f'{base}_{suffix}'
+        suffix += 1
+    used_stems.add(stem.casefold())
+    return (f'{stem}_{ALL_CELLS_FILENAME}',
+            f'{stem}_{DEAD_CELLS_FILENAME}')
 
 
 @app.route('/')
@@ -128,14 +148,17 @@ def start_processing():
                 t = tasks[task_id]
             output_dir = OUTPUT_DIR / task_id
             output_dir.mkdir(parents=True, exist_ok=True)
-            all_cell_panels = []
-            dead_cell_panels = []
+            used_output_stems = set()
 
             for i, sel in enumerate(selections):
                 filepath = sel["filepath"]
                 total_ch = sel.get("total_channel", sel.get("live_channel", 0))
                 dead_ch = sel.get("dead_channel")
                 filename = Path(filepath).name
+                annotated_filename, dead_annotated_filename = _annotation_filenames(
+                    filename, used_output_stems)
+                file_all_cell_panels = []
+                file_dead_cell_panels = []
 
                 try:
                     czi_data = read_czi(filepath)
@@ -189,7 +212,7 @@ def start_processing():
                             })
 
                         panel_name = f"{filename} - {s_name}"
-                        all_cell_panels.append((panel_name, annotated))
+                        file_all_cell_panels.append((panel_name, annotated))
 
                         result_item = {
                             "filename": filename,
@@ -203,8 +226,8 @@ def start_processing():
                             "dead": dead_count,
                             "viability": viability,
                             "has_dead": dead_ch is not None,
-                            "annotated_file": ALL_CELLS_FILENAME,
-                            "dead_annotated_file": DEAD_CELLS_FILENAME,
+                            "annotated_file": annotated_filename,
+                            "dead_annotated_file": dead_annotated_filename,
                             "cell_details": cell_details,
                         }
                         with tasks_lock:
@@ -213,7 +236,13 @@ def start_processing():
                         dead_background = dead_img if dead_img is not None else total_img
                         dead_annotated = annotate_image(
                             dead_background, total_result, dead_labels=dead_labels)
-                        dead_cell_panels.append((panel_name, dead_annotated))
+                        file_dead_cell_panels.append((panel_name, dead_annotated))
+
+                    if file_all_cell_panels:
+                        _write_png(output_dir / annotated_filename,
+                                   _build_contact_sheet(file_all_cell_panels))
+                        _write_png(output_dir / dead_annotated_filename,
+                                   _build_contact_sheet(file_dead_cell_panels))
 
                 except Exception as e:
                     with tasks_lock:
@@ -223,15 +252,13 @@ def start_processing():
                     t["done"] = i + 1
                     t["progress"] = int((i + 1) / len(selections) * 100)
 
-            # A timestamp folder always contains exactly these three outputs.
+            # One batch gets one workbook.  Each CZI has its own annotation
+            # image pair in the same timestamp directory; no per-file Excel is
+            # created.
             with tasks_lock:
                 excel_path = output_dir / EXCEL_FILENAME
                 try:
                     sorted_results = sorted(t["results"], key=lambda x: (x["filename"], x["scene"]))
-                    _write_png(output_dir / ALL_CELLS_FILENAME,
-                               _build_contact_sheet(all_cell_panels))
-                    _write_png(output_dir / DEAD_CELLS_FILENAME,
-                               _build_contact_sheet(dead_cell_panels))
                     write_excel(str(excel_path), sorted_results)
                     t["excel_file"] = EXCEL_FILENAME
                 except Exception as e:

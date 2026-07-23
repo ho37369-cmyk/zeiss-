@@ -6,6 +6,7 @@ dist/
 
 # Uploaded files and generated outputs
 output/
+outputs/
 
 # Python bytecode cache
 __pycache__/

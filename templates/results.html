@@ -29,20 +29,25 @@
         {% endif %}
 
         {% if results %}
-        {% set first = results[0] %}
         <div class="results-gallery">
+            {% set seen = namespace(files=[]) %}
+            {% for result in results %}
+            {% if result.annotated_file not in seen.files %}
+            {% set seen.files = seen.files + [result.annotated_file] %}
             <div class="result-card">
-                <a href="/download/{{ task_id }}/{{ first.annotated_file }}" target="_blank">
-                    <img src="/download/{{ task_id }}/{{ first.annotated_file }}" alt="所有细胞标识图">
+                <a href="/download/{{ task_id }}/{{ result.annotated_file }}" target="_blank">
+                    <img src="/download/{{ task_id }}/{{ result.annotated_file }}" alt="所有细胞标识图">
                 </a>
-                <div class="result-card-body"><div class="filename">所有细胞标识图</div></div>
+                <div class="result-card-body"><div class="filename">{{ result.filename }} — 所有细胞</div></div>
             </div>
             <div class="result-card dead-card">
-                <a href="/download/{{ task_id }}/{{ first.dead_annotated_file }}" target="_blank">
-                    <img src="/download/{{ task_id }}/{{ first.dead_annotated_file }}" alt="死细胞标识图">
+                <a href="/download/{{ task_id }}/{{ result.dead_annotated_file }}" target="_blank">
+                    <img src="/download/{{ task_id }}/{{ result.dead_annotated_file }}" alt="死细胞标识图">
                 </a>
-                <div class="result-card-body"><div class="filename">死细胞标识图</div></div>
+                <div class="result-card-body"><div class="filename">{{ result.filename }} — 死细胞</div></div>
             </div>
+            {% endif %}
+            {% endfor %}
         </div>
         {% endif %}
 

@@ -56,21 +56,34 @@ class CalibratedCountingTests(unittest.TestCase):
         yy, xx = np.mgrid[:100, :100]
         image = np.zeros((100, 100), dtype=np.float32)
         for y, x in [(20, 20), (50, 55), (80, 25)]:
-            image += 180 * np.exp(-((yy-y)**2 + (xx-x)**2) / (2 * 5**2))
+            image += 180 * np.exp(-((yy-y)**2 + (xx-x)**2) / (2 * 7**2))
         result = count_cells(np.clip(image, 0, 255).astype(np.uint8),
                              "fluorescence", role="total")
         self.assertEqual(result["total"], 3)
         self.assertEqual(result["labels"].max(), 3)
 
-    def test_close_optical_halos_remain_separate_cells(self):
-        """Neighbouring 9--12 px nuclei must not collapse into one peak."""
-        yy, xx = np.mgrid[:100, :100]
-        image = np.zeros((100, 100), dtype=np.float32)
-        for y, x in [(50, 40), (50, 51), (50, 62)]:
-            image += 180 * np.exp(-((yy-y)**2 + (xx-x)**2) / (2 * 3**2))
+    def test_asymmetric_touching_nuclei_remain_separate_cells(self):
+        """Dim nuclei on a bright neighbour's shoulder need their own seeds."""
+        yy, xx = np.mgrid[:140, :140]
+        image = np.zeros((140, 140), dtype=np.float32)
+        for y, x, amplitude, sigma in [
+                (70, 48, 240, 8), (52, 76, 115, 8), (82, 82, 105, 8)]:
+            image += amplitude * np.exp(
+                -((yy-y)**2 + (xx-x)**2) / (2 * sigma**2))
         result = count_cells(np.clip(image, 0, 255).astype(np.uint8),
                              "fluorescence", role="total")
         self.assertEqual(result["total"], 3)
+
+    def test_one_uneven_nucleus_is_not_split_by_shallow_double_peak(self):
+        """Two close brightness maxima inside one broad nucleus count once."""
+        yy, xx = np.mgrid[:120, :120]
+        image = 55 * np.exp(-((yy-60)**2 + (xx-60)**2) / (2 * 11**2))
+        for x in (55, 65):
+            image += 120 * np.exp(
+                -((yy-60)**2 + (xx-x)**2) / (2 * 5**2))
+        result = count_cells(np.clip(image, 0, 255).astype(np.uint8),
+                             "fluorescence", role="total")
+        self.assertEqual(result["total"], 1)
 
     def test_dead_fragments_are_merged_before_nucleus_matching(self):
         yy, xx = np.mgrid[:100, :100]
@@ -94,6 +107,32 @@ class CalibratedCountingTests(unittest.TestCase):
             {"label": 3, "peak": (20, 35)},
         ]}
         self.assertEqual(match_dead_cells(total, dead), {1})
+
+    def test_strong_pi_peak_inside_asymmetric_nucleus_matches_by_region(self):
+        total_labels = np.zeros((80, 80), dtype=np.int32)
+        total_labels[20:60, 10:65] = 1
+        total = {"labels": total_labels, "props": [
+            {"label": 1, "peak": (40, 15)},
+        ]}
+        dead_labels = np.zeros_like(total_labels)
+        dead_labels[37:44, 52:59] = 1
+        dead = {"labels": dead_labels, "props": [
+            {"label": 1, "peak": (40, 55), "peak_background_mad": 35.0},
+        ]}
+        self.assertEqual(match_dead_cells(total, dead), {1})
+
+    def test_dim_pi_peak_does_not_bypass_centre_distance_guard(self):
+        total_labels = np.zeros((80, 80), dtype=np.int32)
+        total_labels[20:60, 10:65] = 1
+        total = {"labels": total_labels, "props": [
+            {"label": 1, "peak": (40, 15)},
+        ]}
+        dead_labels = np.zeros_like(total_labels)
+        dead_labels[37:44, 52:59] = 1
+        dead = {"labels": dead_labels, "props": [
+            {"label": 1, "peak": (40, 55), "peak_background_mad": 20.0},
+        ]}
+        self.assertEqual(match_dead_cells(total, dead), set())
 
 
 class DeadCellMatchingTests(unittest.TestCase):

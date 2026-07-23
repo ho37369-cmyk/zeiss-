@@ -89,7 +89,8 @@ def create_dead_mask(dead_result):
 
 
 def match_dead_cells(total_result, dead_result, min_overlap_fraction=0.10,
-                     max_gap_pixels=8, max_peak_distance=12):
+                     max_gap_pixels=8, max_peak_distance=12,
+                     min_direct_peak_mad=30):
     """Match dead-stain detections to accepted total-cell objects.
 
     A dead detection is counted only when a meaningful portion overlaps an
@@ -110,9 +111,13 @@ def match_dead_cells(total_result, dead_result, min_overlap_fraction=0.10,
     dead_props = dead_result.get("props", [])
 
     # The calibrated Hoechst/PI pipeline records the detection centre for each
-    # object.  Match those centres directly so watershed regions extending into
-    # dim background cannot create false PI associations.  Multiple PI peaks
-    # mapping to one Hoechst nucleus are deliberately counted once.
+    # object.  A very strong PI peak located inside an accepted nucleus region
+    # is assigned to that region first.  This handles elongated/asymmetric
+    # nuclei whose LoG seed can be far from the PI-positive portion.  We only
+    # allow this for peaks at least 30 background MAD above baseline, so dim
+    # foreground texture is not promoted to a dead cell.  Remaining candidates
+    # use the conservative centre-distance rule.  Multiple PI peaks mapping to
+    # one Hoechst nucleus are deliberately counted once.
     if (total_props and dead_props
             and all("peak" in p for p in total_props)
             and all("peak" in p for p in dead_props)):
@@ -121,6 +126,14 @@ def match_dead_cells(total_result, dead_result, min_overlap_fraction=0.10,
         max_distance_sq = float(max_peak_distance) ** 2
         for dead_prop in dead_props:
             point = np.asarray(dead_prop["peak"], dtype=float)
+            y, x = np.rint(point).astype(int)
+            if 0 <= y < total_labels.shape[0] and 0 <= x < total_labels.shape[1]:
+                region_label = int(total_labels[y, x])
+                peak_mad = dead_prop.get("peak_background_mad")
+                if (region_label in valid_total and peak_mad is not None
+                        and float(peak_mad) >= min_direct_peak_mad):
+                    matches.add(region_label)
+                    continue
             distances_sq = np.sum((total_points - point) ** 2, axis=1)
             nearest = int(np.argmin(distances_sq))
             if distances_sq[nearest] <= max_distance_sq:

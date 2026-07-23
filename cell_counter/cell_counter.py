@@ -52,16 +52,24 @@ PARAMS_FLUORESCENCE = {
 # Hoechst needs one peak per nucleus, while PI needs broad smoothing so
 # apoptotic fragments do not become separate dead-cell candidates.
 PARAMS_NUCLEI = {
-    # A 4-pixel blur made adjacent, in-focus nuclei share one broad maximum.
-    # At the native acquisition scale the neighbouring optical halos in a
-    # doublet are typically 9--12 pixels apart, so use a smaller blur and let
-    # the watershed split them at their genuine valley instead of merging
-    # them before peak detection.
+    # Use a modest blur for the foreground mask and watershed surface.  The
+    # actual seeds come from scale-space blobs below: plain local maxima split
+    # one slightly uneven nucleus into several cells, yet miss a dim nucleus
+    # sitting on the shoulder of a brighter neighbour.
     "smooth_sigma": 2.5,
-    "peak_min_distance": 6,
     "peak_background_mad": 2.5,
     "min_peak_intensity": 5.0,
     "mask_background_mad": 1.5,
+    "blob_bg_sigma": 25,
+    "blob_min_sigma": 2,
+    "blob_max_sigma": 14,
+    "blob_num_sigma": 13,
+    "blob_threshold": 0.006,
+    "blob_overlap": 0.5,
+    # At this acquisition scale real nuclei occupy sigma >= 6 structures.
+    # Finer maxima are retained during scale-space suppression, then excluded
+    # as intra-nuclear texture rather than becoming extra watershed seeds.
+    "min_nucleus_sigma": 6,
 }
 
 PARAMS_DEAD_STAIN = {
@@ -109,7 +117,12 @@ def _peak_markers(smoothed, threshold, min_distance):
 
 
 def _count_nuclei(image):
-    """Count all cells as one robust intensity peak per Hoechst/DAPI nucleus."""
+    """Count one scale-space blob per Hoechst/DAPI nucleus.
+
+    Multi-scale LoG seeds distinguish a true dim neighbour from the sloping
+    halo of a bright nucleus.  Keeping only nucleus-sized scales also prevents
+    shallow local maxima inside one round nucleus from causing over-segmentation.
+    """
     p = PARAMS_NUCLEI
     img = _ensure_uint8(image)
     values, background, mad = _robust_background(img)
@@ -118,8 +131,37 @@ def _count_nuclei(image):
         p["min_peak_intensity"],
         background + p["peak_background_mad"] * mad,
     )
-    points, markers = _peak_markers(
-        smoothed, peak_threshold, p["peak_min_distance"])
+    background_field = cv2.GaussianBlur(
+        values, (0, 0), p["blob_bg_sigma"])
+    foreground = np.maximum(values - background_field, 0)
+    foreground /= max(float(foreground.max()), 1.0)
+    try:
+        blobs = blob_log(
+            foreground,
+            min_sigma=p["blob_min_sigma"],
+            max_sigma=p["blob_max_sigma"],
+            num_sigma=p["blob_num_sigma"],
+            threshold=p["blob_threshold"],
+            overlap=p["blob_overlap"],
+        )
+    except Exception:
+        blobs = np.empty((0, 3), dtype=float)
+
+    accepted_points = set()
+    for y, x, sigma in blobs:
+        yi, xi = int(round(y)), int(round(x))
+        if sigma < p["min_nucleus_sigma"]:
+            continue
+        if not (0 <= yi < img.shape[0] and 0 <= xi < img.shape[1]):
+            continue
+        if smoothed[yi, xi] < peak_threshold:
+            continue
+        accepted_points.add((yi, xi))
+
+    points = np.asarray(sorted(accepted_points), dtype=np.int32)
+    markers = np.zeros(img.shape, dtype=np.int32)
+    for label, point in enumerate(points, start=1):
+        markers[tuple(point)] = label
     if len(points) == 0:
         empty = np.zeros(img.shape, dtype=bool)
         return empty, np.zeros(img.shape, dtype=np.int32), []
@@ -161,6 +203,9 @@ def _count_dead_stain(image):
     for prop in props:
         y, x = points[int(prop["label"]) - 1]
         prop["peak"] = (int(y), int(x))
+        prop["peak_intensity"] = float(smoothed[y, x])
+        prop["peak_background_mad"] = float(
+            (smoothed[y, x] - background) / mad)
     return mask, labels, props
 
 

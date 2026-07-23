@@ -1,5 +1,8 @@
 # Build output (PyInstaller)
 CellCounter/
+build/
+dist/
+*.egg-info/
 
 # Uploaded files and generated outputs
 output/
@@ -8,6 +11,9 @@ output/
 __pycache__/
 *.py[cod]
 *.pyo
+.pytest_cache/
+.coverage
+htmlcov/
 
 # Virtual environment
 .venv/
@@ -49,3 +55,4 @@ progress.md
 
 # Large data files (CZI images, etc.)
 数据/
+*.czi

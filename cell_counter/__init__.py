@@ -1,6 +1,6 @@
 from .czi_reader import read_czi
 from .channel_classifier import classify_channels, ChannelInfo
-from .cell_counter import count_cells
+from .cell_counter import count_cells, classify_brightfield_dead_cells
 from .annotator import annotate_image, create_dead_mask, match_dead_cells
 from .excel_writer import write_excel
 
@@ -9,6 +9,7 @@ __all__ = [
     "classify_channels",
     "ChannelInfo",
     "count_cells",
+    "classify_brightfield_dead_cells",
     "annotate_image",
     "create_dead_mask",
     "match_dead_cells",

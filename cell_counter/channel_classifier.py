@@ -23,10 +23,10 @@ BRIGHTFIELD_KEYWORDS = [
     "tl", "trans", "transmission", "white light",
 ]
 
-# Nuclear stains label the population used for total-cell counting.  PI/red
-# viability stains label the dead subset.  DAPI/Hoechst must not be treated as
-# a dead stain: in the calibrated J774 data Hoechst is the manual-counting
-# reference for every cell.
+# Dye names are useful hints, but they are not authoritative.  In different
+# experiments the same dye can be used for the total-cell or dead-cell stain.
+# Roles are therefore assigned from the observed object counts first; these
+# sets are retained only as a tie-breaker when the image evidence is unusable.
 TOTAL_DYES = {"dapi"}
 DEAD_DYES = {"tritc", "cy5", "pi", "rhodamine"}
 
@@ -70,37 +70,64 @@ def classify_channels(channel_metadata, scenes):
         ch_type, dye = _classify_single_channel(name, img)
         results.append(ChannelInfo(index=idx, name=name, channel_type=ch_type, dye=dye))
 
-    # When two fluorescence channels exist, the dense nuclear channel is a
-    # substantially more reliable total-cell reference than transmitted light.
-    # The sparse channel is the viability/dead stain.  Brightfield remains the
-    # fallback for acquisitions without a total-cell fluorescence channel.
+    # When two fluorescence channels exist, choose roles from the observed
+    # population size.  Dead cells are expected to be a strict subset of all
+    # cells, so the channel with more nucleus-like detections is the total-cell
+    # reference and the sparse channel is the dead-cell stain.  This is
+    # deliberately independent of dye names: a DAPI channel can be the dead
+    # stain and rhodamine can label all cells in another experiment.
     brightfield = [r for r in results if r.channel_type == "brightfield"]
     fluorescence = [r for r in results if r.channel_type == "fluorescence"]
     if fluorescence:
-        for r in fluorescence:
-            if r.dye in TOTAL_DYES:
-                r.role = "total"
-            if r.dye in DEAD_DYES:
-                r.role = "dead"
+        if len(fluorescence) >= 2:
+            peak_counts = {
+                r.index: _nuclear_peak_count(image_samples.get(r.index))
+                for r in fluorescence
+            }
+            max_count = max(peak_counts.values())
+            min_count = min(peak_counts.values())
 
-        if not any(r.role == "total" for r in fluorescence) and len(fluorescence) >= 2:
-            candidates = [r for r in fluorescence if r.role != "dead"]
-            if candidates:
-                max(
-                    candidates,
-                    key=lambda r: _nuclear_peak_count(image_samples.get(r.index)),
-                ).role = "total"
+            # Only use count-based assignment when at least one channel has
+            # usable detections and the ordering is informative.  A tie (or
+            # two empty/very dim channels) is resolved by the dye hints below.
+            if max_count > 0 and max_count > min_count:
+                total = max(fluorescence, key=lambda r: peak_counts[r.index])
+                dead = min(fluorescence, key=lambda r: peak_counts[r.index])
+            else:
+                total = next(
+                    (r for r in fluorescence if r.dye in TOTAL_DYES), None)
+                dead = next(
+                    (r for r in fluorescence if r.dye in DEAD_DYES and r is not total),
+                    None,
+                )
+                if total is None:
+                    total = max(
+                        fluorescence,
+                        key=lambda r: _fluorescence_occupancy(
+                            image_samples.get(r.index)),
+                    )
+                if dead is None:
+                    candidates = [r for r in fluorescence if r is not total]
+                    if candidates:
+                        dead = min(
+                            candidates,
+                            key=lambda r: _fluorescence_occupancy(
+                                image_samples.get(r.index)),
+                        )
 
-        if not any(r.role == "dead" for r in fluorescence):
-            candidates = [r for r in fluorescence if r.role != "total"]
-            if candidates:
-                min(
-                    candidates,
-                    key=lambda r: _fluorescence_occupancy(image_samples.get(r.index)),
-                ).role = "dead"
+            for r in fluorescence:
+                r.role = None
+            total.role = "total"
+            if dead is not None and dead is not total:
+                dead.role = "dead"
+        elif len(fluorescence) == 1:
+            # A lone fluorescence channel cannot establish a dead-cell subset;
+            # treat it as the total-cell reference and leave dead unassigned.
+            fluorescence[0].role = "total"
 
-    if not any(r.role == "total" for r in results) and brightfield:
-        brightfield[0].role = "total"
+    # Brightfield is a morphology/reference channel only.  It must never be
+    # promoted to the total-cell role: the counting workflow is intentionally
+    # restricted to black-background, bright-spot fluorescence channels.
 
     return results
 
@@ -147,7 +174,17 @@ def _classify_by_image_stats(image):
 
     if median_val < 45 or dark_fraction > 0.45:
         return "fluorescence", "other"
-    if mean_val > 80 and median_val > 65 and p90 > 90:
+    # Darkly exposed phase/brightfield fields often have a mean just below
+    # 80 (the previous cut-off misclassified the supplied 79.7/75 field as
+    # fluorescence).  A high median and very small near-black fraction are
+    # stronger indicators of transmitted light than an absolute mean.
+    if ((mean_val >= 75 and median_val >= 60 and p90 >= 90)
+            # Low-exposure phase fields can be fairly flat after display
+            # normalization (for example, median ~60 and p90 ~75).  Their
+            # small near-black fraction is the useful distinction from a
+            # fluorescence image with a dark background.
+            or (median_val >= 50 and dark_fraction < 0.08
+                and p90 >= median_val + 5)):
         return "brightfield", None
     if low > 0.5 or (std_val > mean_val * 0.7 and median_val < 70):
         return "fluorescence", "other"

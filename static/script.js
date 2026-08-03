@@ -2,6 +2,12 @@
 let uploadedFiles = []; // { filepath, filename, scenes, channels, previews, error? }
 let channelSelections = {}; // { filepath: { channels_info } }
 
+async function shutdownApp() {
+    if (!confirm('确定要退出细胞计数工具吗？')) return;
+    await fetch('/shutdown', {method: 'POST'});
+    document.body.innerHTML = '<div class="shutdown-message"><h2>程序已退出</h2><p>现在可以关闭此页面。</p></div>';
+}
+
 // ========== Drag & Drop ==========
 
 // ---- 1. Document-level prevention: stops Edge from hijacking the drop ----
@@ -142,6 +148,9 @@ async function addPaths(paths) {
 
 // ========== File List & Channel Selection ==========
 function renderFileList(files) {
+    // Browsers do not guarantee folder/file-picker order. Use a human/numeric
+    // sort so names such as sample-2.czi appear before sample-10.czi.
+    files = files.slice().sort(naturalFileCompare);
     uploadedFiles = files;
     // A rendered list is one batch. Avoid retaining files from a previous
     // selection when the user opens another batch without refreshing.
@@ -152,15 +161,17 @@ function renderFileList(files) {
     let html = '<div style="margin-bottom:10px;font-size:14px;font-weight:600;">已发现 <strong>' +
                files.filter(f => !f.error).length + '</strong> 个 CZI 文件：</div>';
 
-    for (const f of files) {
+    files.forEach((f, fileIndex) => {
         if (f.error) {
-            html += '<div class="file-item"><span class="file-icon">&#9888;</span>';
+            html += '<div class="file-entry"><div class="file-item"><span class="file-order">' +
+                    String(fileIndex + 1).padStart(2, '0') + '</span><span class="file-icon">&#9888;</span>';
             html += '<span class="file-name">' + f.filename + '</span>';
-            html += '<span class="file-status" style="color:#e53935;">错误: ' + f.error + '</span></div>';
-            continue;
+            html += '<span class="file-status" style="color:#e53935;">错误: ' + f.error + '</span></div></div>';
+            return;
         }
 
-        html += '<div class="file-item">';
+        html += '<div class="file-entry"><div class="file-item">';
+        html += '<span class="file-order">' + String(fileIndex + 1).padStart(2, '0') + '</span>';
         html += '<span class="file-icon">&#128196;</span>';
         html += '<span class="file-name">' + f.filename + '</span>';
         if (f.scenes.length > 1) {
@@ -192,8 +203,8 @@ function renderFileList(files) {
             if (f.scenes.length > 1) break; // Only show first scene preview
         }
 
-        html += '</div>';
-    }
+        html += '</div></div>';
+    });
 
     fileList.innerHTML = html;
 
@@ -221,20 +232,20 @@ function escapeAttr(str) {
 
 // ========== Processing ==========
 async function startProcess() {
-    // Prefer the classifier's calibrated dense nuclear channel for all cells;
-    // brightfield remains the fallback when no such channel is available.
+    // Only fluorescence channels are countable.  Brightfield previews are
+    // shown for reference but are never selected for total/dead counting.
     const selections = Object.values(channelSelections).map(s => {
         const allChs = (s.channels_info || []).slice().sort((a, b) => a.index - b.index);
-        const brightfieldChs = (s.channels_info || []).filter(
-            ch => ch.channel_type === 'brightfield'
-        ).sort((a, b) => a.index - b.index);
         const fluoChs = (s.channels_info || []).filter(
             ch => ch.channel_type !== 'brightfield'
         ).sort((a, b) => a.index - b.index);
+        if (fluoChs.length === 0) return null;
         const recommendedTotal = allChs.find(ch => ch.role === 'total');
         const recommendedDead = fluoChs.find(ch => ch.role === 'dead');
-        const totalCh = (recommendedTotal || brightfieldChs[0] || fluoChs[0]);
-        const deadCh = recommendedDead || fluoChs[0];
+        const totalCh = (recommendedTotal || fluoChs.find(ch => ch.role !== 'dead') || fluoChs[0]);
+        // Do not use the total channel as a dead-cell fallback.  With one
+        // fluorescence channel the dead count is explicitly zero.
+        const deadCh = recommendedDead;
         return {
             ...s,
             total_channel: totalCh ? totalCh.index : 0,
@@ -242,9 +253,9 @@ async function startProcess() {
             live_channel: totalCh ? totalCh.index : 0,
             dead_channel: deadCh ? deadCh.index : undefined,
         };
-    });
+    }).filter(Boolean);
     if (selections.length === 0) {
-        alert('请先添加文件');
+        alert('未检测到可计数的荧光通道（黑底白色亮点图）；白光通道不会参与计数。');
         return;
     }
 
@@ -346,6 +357,23 @@ function showResults(taskId, data) {
     }
 
     resultsDiv.innerHTML = html;
+}
+
+function naturalFileCompare(a, b) {
+    const leftParts = String(a.filename || '').toLocaleLowerCase().split(/(\d+)/);
+    const rightParts = String(b.filename || '').toLocaleLowerCase().split(/(\d+)/);
+    const length = Math.max(leftParts.length, rightParts.length);
+    for (let i = 0; i < length; i++) {
+        const left = leftParts[i] || '';
+        const right = rightParts[i] || '';
+        if (/^\d+$/.test(left) && /^\d+$/.test(right)) {
+            const diff = Number(left) - Number(right);
+            if (diff !== 0) return diff;
+        } else if (left !== right) {
+            return left.localeCompare(right, 'zh-CN');
+        }
+    }
+    return 0;
 }
 
 function escapeHtml(value) {

@@ -1,7 +1,10 @@
 # Build output (PyInstaller)
 CellCounter/
 build/
+build_*/
 dist/
+release/
+release_*/
 *.egg-info/
 
 # Uploaded files and generated outputs

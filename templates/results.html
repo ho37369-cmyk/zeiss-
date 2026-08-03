@@ -10,6 +10,7 @@
     <div class="header">
         <h1>计数结果</h1>
         <p>任务 {{ task_id }}</p>
+        <button class="app-exit" type="button" onclick="shutdownApp()">退出程序</button>
     </div>
     <div class="container">
 
@@ -56,6 +57,13 @@
         {% endif %}
 
     </div>
+    <script>
+        async function shutdownApp() {
+            if (!confirm('确定要退出细胞计数工具吗？')) return;
+            await fetch('/shutdown', {method: 'POST'});
+            document.body.innerHTML = '<div class="shutdown-message"><h2>程序已退出</h2><p>现在可以关闭此页面。</p></div>';
+        }
+    </script>
 </body>
 </html>
 

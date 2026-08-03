@@ -1,4 +1,5 @@
-import os, sys, json, threading, zipfile, io, time, base64, webbrowser, tempfile, re
+import os, sys, json, threading, zipfile, io, time, base64, webbrowser, tempfile, re, logging
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 import cv2
@@ -22,8 +23,37 @@ app = Flask(__name__,
     static_folder=str(BUNDLE_DIR / 'static'))
 app.secret_key = os.urandom(24)
 
-OUTPUT_DIR = APP_DIR / 'analysis_results'
-OUTPUT_DIR.mkdir(exist_ok=True)
+APP_ID = 'cell-counter-local-app'
+APP_VERSION = '1.0.0'
+APP_HOST = '127.0.0.1'
+APP_PORT = 51273
+
+
+def _user_documents_dir():
+    """Return a writable, user-visible result directory for packaged builds."""
+    documents = Path.home() / 'Documents'
+    if not documents.exists():
+        documents = Path.home()
+    return documents / '细胞计数结果'
+
+
+if getattr(sys, 'frozen', False):
+    OUTPUT_DIR = _user_documents_dir()
+    app_data_root = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'CellCounter'
+else:
+    OUTPUT_DIR = APP_DIR / 'analysis_results'
+    app_data_root = APP_DIR
+
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+log_dir = app_data_root / 'logs'
+log_dir.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    filename=str(log_dir / 'cell_counter.log'),
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+    encoding='utf-8',
+)
+logger = logging.getLogger('cell_counter')
 UPLOAD_DIR = Path(tempfile.gettempdir()) / 'cell_counter_uploads'
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -47,6 +77,12 @@ def _safe_output_stem(filename):
     return (stem or 'CZI文件')[:120]
 
 
+def _natural_sort_key(path):
+    """Sort CZI names in human order: 拍摄-2.czi before 拍摄-10.czi."""
+    return tuple((0, int(part)) if part.isdigit() else (1, part.casefold())
+                 for part in re.split(r'(\d+)', Path(path).name))
+
+
 def _annotation_filenames(filename, used_stems):
     """Build a unique pair of annotation filenames for one input CZI."""
     base = _safe_output_stem(filename)
@@ -65,6 +101,18 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/health')
+def health():
+    return jsonify({'app': APP_ID, 'version': APP_VERSION})
+
+
+@app.route('/shutdown', methods=['POST'])
+def shutdown():
+    """Let a local user stop the otherwise windowless packaged application."""
+    threading.Timer(0.25, lambda: os._exit(0)).start()
+    return jsonify({'status': 'stopping'})
+
+
 @app.route('/upload', methods=['POST'])
 def upload_files():
     data = request.get_json(force=True)
@@ -80,6 +128,8 @@ def upload_files():
             czi_files.extend(sorted(pp.rglob('*.czi')))
         elif pp.is_file() and pp.suffix.lower() == '.czi':
             czi_files.append(pp)
+
+    czi_files = sorted(czi_files, key=_natural_sort_key)
 
     if not czi_files:
         return jsonify({'error': 'No .czi files found in the provided paths'}), 400
@@ -182,18 +232,48 @@ def start_processing():
                                 ch_info = c
                                 break
                         ch_type = (ch_info or {}).get("channel_type", "fluorescence")
+                        # Brightfield is a reference image, not a counting
+                        # channel.  Refuse it explicitly instead of silently
+                        # running the morphology counter on it.
+                        if ch_type == "brightfield":
+                            with tasks_lock:
+                                t["errors"].append(
+                                    f"{filename} - {s_name}: brightfield channel is excluded; "
+                                    "select a black-background fluorescence channel"
+                                )
+                            continue
                         total_result = count_cells(
                             total_img, ch_type,
                             dye=(ch_info or {}).get("dye"), role="total")
 
                         dead_mask = None
                         dead_result = None
-                        if dead_ch is not None and dead_img is not None:
-                            dead_result = count_cells(
-                                dead_img, "fluorescence", role="dead")
-                            dead_mask = create_dead_mask(dead_result)
-
+                        if (dead_ch is not None and dead_img is not None
+                                and dead_ch != total_ch):
+                            dead_info = next(
+                                (c for c in sel.get("channels_info", [])
+                                 if c.get("index") == dead_ch), {})
+                            if dead_info.get("channel_type") == "brightfield":
+                                dead_img = None
+                            else:
+                                dead_result = count_cells(
+                                    dead_img, "fluorescence", role="dead")
+                                dead_mask = create_dead_mask(dead_result)
                         dead_labels = match_dead_cells(total_result, dead_result)
+                        # Matching is one-to-one, but keep this invariant at
+                        # the result boundary as a final safety guard.
+                        dead_labels = {
+                            int(label) for label in dead_labels
+                            if int(label) in {
+                                int(prop["label"]) for prop in total_result["props"]
+                            }
+                        }
+                        # Viability is defined only for a proper subset here:
+                        # never allow a batch to report all detected cells as
+                        # dead (or more dead cells than total cells).
+                        max_dead = max(total_result["total"] - 1, 0)
+                        if len(dead_labels) > max_dead:
+                            dead_labels = set(sorted(dead_labels)[:max_dead])
                         annotated = annotate_image(
                             total_img, total_result, dead_mask, dead_labels=dead_labels)
 
@@ -225,7 +305,7 @@ def start_processing():
                             "live": live_count,
                             "dead": dead_count,
                             "viability": viability,
-                            "has_dead": dead_ch is not None,
+                            "has_dead": dead_result is not None,
                             "annotated_file": annotated_filename,
                             "dead_annotated_file": dead_annotated_filename,
                             "cell_details": cell_details,
@@ -267,7 +347,7 @@ def start_processing():
                     tb = traceback.format_exc()
                     t["errors"].append(f"Excel error: {str(e)}\n{tb}")
                     t["excel_file"] = ""
-                    print(f"[ExcelError] {tb}", file=sys.stderr, flush=True)
+                    logger.error("Excel export failed:\n%s", tb)
 
             with tasks_lock:
                 t["status"] = "complete"
@@ -277,7 +357,7 @@ def start_processing():
             import traceback
             import sys
             tb = traceback.format_exc()
-            print(f"[FatalWorkerError] {tb}", file=sys.stderr, flush=True)
+            logger.error("Processing worker failed:\n%s", tb)
             with tasks_lock:
                 tt = tasks.get(task_id)
                 if tt is not None:
@@ -433,6 +513,8 @@ def upload_file():
             f.save(str(save_path))
             saved_paths.append(str(save_path))
 
+    saved_paths = sorted(saved_paths, key=_natural_sort_key)
+
     if not saved_paths:
         return jsonify({'error': 'No .czi files found in the upload'}), 400
 
@@ -475,22 +557,62 @@ def upload_file():
 
     return jsonify({'files': analyzed})
 
-if __name__ == '__main__':
-    # Use one fixed port.  Silently moving to another port allowed several old
-    # server versions to stay alive and made browser requests hit stale code.
+def _is_cell_counter_running(url):
+    try:
+        with urllib.request.urlopen(f'{url}/health', timeout=1.0) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+        return payload.get('app') == APP_ID
+    except Exception:
+        return False
+
+
+def _open_browser_when_ready(url):
+    for _ in range(50):
+        if _is_cell_counter_running(url):
+            webbrowser.open(url)
+            return
+        time.sleep(0.1)
+    logger.error('The local web server did not become ready: %s', url)
+
+
+def _show_startup_error(message):
+    logger.error(message)
+    if os.name == 'nt':
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, message, '细胞计数工具', 0x10)
+
+
+def run_desktop_app():
+    """Start one windowless local server and open its browser UI."""
     import socket
-    port = 5000
+    url = f'http://{APP_HOST}:{APP_PORT}'
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        sock.bind(('127.0.0.1', port))
+        sock.bind((APP_HOST, APP_PORT))
     except OSError:
-        print('ERROR: CellCounter is already running on http://127.0.0.1:5000')
-        sys.exit(1)
-    finally:
         sock.close()
-    url = f'http://127.0.0.1:{port}'
-    print(f' * Starting server on {url}')
-    # Auto-open browser after a short delay
-    threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-    app.run(host='127.0.0.1', port=port, debug=False, threaded=True)
+        if _is_cell_counter_running(url):
+            webbrowser.open(url)
+            return
+        _show_startup_error(
+            f'无法启动细胞计数工具：本机端口 {APP_PORT} 已被其他程序占用。')
+        return
+    else:
+        sock.close()
+
+    logger.info('Starting CellCounter %s at %s; results: %s',
+                APP_VERSION, url, OUTPUT_DIR)
+    logging.getLogger('werkzeug').setLevel(logging.WARNING)
+    threading.Thread(
+        target=_open_browser_when_ready, args=(url,), daemon=True).start()
+    app.run(host=APP_HOST, port=APP_PORT, debug=False,
+            threaded=True, use_reloader=False)
+
+
+if __name__ == '__main__':
+    try:
+        run_desktop_app()
+    except Exception:
+        logger.exception('Application startup failed')
+        _show_startup_error('细胞计数工具启动失败，请查看日志后联系技术支持。')
 

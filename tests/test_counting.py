@@ -10,12 +10,37 @@ import openpyxl
 import app as web_app
 
 from cell_counter.annotator import match_dead_cells
-from cell_counter.cell_counter import _compact_labels, count_cells
+from cell_counter.cell_counter import (
+    _compact_labels, classify_brightfield_dead_cells, count_cells,
+)
 from cell_counter.channel_classifier import classify_channels
 from cell_counter.excel_writer import write_excel
 
 
 class ChannelClassificationTests(unittest.TestCase):
+    def test_darkly_exposed_phase_field_is_not_misclassified_as_fluorescence(self):
+        rng = np.random.default_rng(4)
+        image = np.clip(rng.normal(80, 12, (128, 128)), 0, 255).astype(np.uint8)
+        result = classify_channels(
+            [{"index": 0, "name": "Channel 0", "dye": None}],
+            {"Scene0": {"channels": [
+                {"index": 0, "name": "Channel 0", "image": image},
+            ]}},
+        )
+        self.assertEqual(result[0].channel_type, "brightfield")
+
+    def test_low_contrast_phase_field_is_not_misclassified_as_fluorescence(self):
+        """Low-exposure phase images resemble the attached cell field."""
+        rng = np.random.default_rng(16)
+        image = np.clip(rng.normal(62, 6, (128, 128)), 0, 255).astype(np.uint8)
+        result = classify_channels(
+            [{"index": 0, "name": "Channel 0", "dye": None}],
+            {"Scene0": {"channels": [
+                {"index": 0, "name": "Channel 0", "image": image},
+            ]}},
+        )
+        self.assertEqual(result[0].channel_type, "brightfield")
+
     def test_generic_channels_are_classified_by_image_and_assigned_roles(self):
         rng = np.random.default_rng(7)
         dead = rng.integers(0, 5, (128, 128), dtype=np.uint8)
@@ -54,8 +79,56 @@ class ChannelClassificationTests(unittest.TestCase):
         result = classify_channels(metadata, scenes)
         self.assertEqual([c.role for c in result], ["total", "dead"])
 
+    def test_roles_follow_population_size_when_dye_usage_is_reversed(self):
+        """A sparse DAPI channel must be dead when rhodamine is the total stain."""
+        rng = np.random.default_rng(22)
+        dapi_dead = rng.integers(0, 4, (128, 128), dtype=np.uint8)
+        dapi_dead[25:33, 28:36] = 220
+        rhodamine_total = rng.integers(0, 4, (128, 128), dtype=np.uint8)
+        for y, x in [(18, 18), (42, 70), (76, 38), (102, 102), (105, 24)]:
+            rhodamine_total[y - 5:y + 6, x - 5:x + 6] = 220
+
+        scenes = {"Scene0": {"channels": [
+            {"index": 0, "name": "DAPI", "image": dapi_dead},
+            {"index": 1, "name": "Rhodamine", "image": rhodamine_total},
+        ]}}
+        result = classify_channels(
+            [{"index": 0, "name": "DAPI", "dye": "DAPI"},
+             {"index": 1, "name": "Rhodamine", "dye": "Rhodamine"}],
+            scenes,
+        )
+        self.assertEqual([c.role for c in result], ["dead", "total"])
+
 
 class CalibratedCountingTests(unittest.TestCase):
+    def test_brightfield_dead_fallback_requires_dark_granular_cell(self):
+        rng = np.random.default_rng(12)
+        h = w = 180
+        yy, xx = np.mgrid[:h, :w]
+        image = np.full((h, w), 120, dtype=np.float32)
+        image += rng.normal(0, 1, image.shape)
+        labels = np.zeros((h, w), dtype=np.int32)
+        props = []
+        centres = [(30 + 40 * (i // 4), 30 + 40 * (i % 4))
+                   for i in range(8)]
+        for label, (y, x) in enumerate(centres, start=1):
+            region = (yy - y) ** 2 + (xx - x) ** 2 <= 12 ** 2
+            labels[region] = label
+            if label == 8:
+                image[region] = 65 + rng.normal(0, 18, int(region.sum()))
+            else:
+                image[region] = 105 + rng.normal(0, 2, int(region.sum()))
+            props.append({"label": label})
+
+        result = {"labels": labels, "props": props}
+        self.assertEqual(classify_brightfield_dead_cells(
+            np.clip(image, 0, 255).astype(np.uint8), result), {8})
+
+        # Uniformly textured live cells do not create a forced positive.
+        image[:] = 105
+        self.assertEqual(classify_brightfield_dead_cells(
+            image.astype(np.uint8), result), set())
+
     def test_total_nuclei_have_one_label_per_peak(self):
         yy, xx = np.mgrid[:100, :100]
         image = np.zeros((100, 100), dtype=np.float32)

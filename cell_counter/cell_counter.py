@@ -82,6 +82,20 @@ PARAMS_DEAD_STAIN = {
     "marker_radius": 4,
 }
 
+# A phase/brightfield image does not have a dedicated viability dye.  Dead
+# cells can nevertheless be identified conservatively when they have the
+# characteristic dense, granular interior and a darker-than-local-background
+# centre.  These limits are deliberately expressed in robust (MAD-based)
+# units so that they survive illumination changes between fields.
+PARAMS_BRIGHTFIELD_DEAD = {
+    "interior_erosion": 3,
+    "background_radius": 18,
+    "min_darkness": 2.0,
+    "min_texture": 1.8,
+    "min_score": 2.5,
+    "min_cells": 5,
+}
+
 
 def count_cells(image, channel_type, dye=None, role=None):
     if role == "total" and channel_type != "brightfield":
@@ -94,6 +108,80 @@ def count_cells(image, channel_type, dye=None, role=None):
         mask, labels, props = _count_fluorescence(image)
     labels, props = _compact_labels(labels, props)
     return {"total": len(props), "labels": labels, "props": props, "mask": mask}
+
+
+def classify_brightfield_dead_cells(image, total_result):
+    """Legacy morphology helper retained for API compatibility.
+
+    The production workflow never calls this function: brightfield channels
+    are excluded before counting.  It remains available for older integrations
+    and tests that explicitly request the legacy heuristic.
+    """
+    if not total_result or not total_result.get("props"):
+        return set()
+    props = total_result["props"]
+    labels = total_result.get("labels")
+    if labels is None or labels.ndim != 2:
+        return set()
+    p = PARAMS_BRIGHTFIELD_DEAD
+    if len(props) < p["min_cells"]:
+        return set()
+
+    img = _ensure_uint8(image).astype(np.float32)
+    # Remove slow illumination gradients before measuring texture.
+    smooth = cv2.GaussianBlur(img, (0, 0), 2.0)
+    residual = img - smooth
+    local_bg = cv2.GaussianBlur(img, (0, 0), p["background_radius"])
+
+    darkness = []
+    texture = []
+    labels_for_props = []
+    for prop in props:
+        label = int(prop["label"])
+        region = labels == label
+        if not np.any(region):
+            continue
+        # Exclude the phase halo/outline; fall back to the full region for
+        # very small objects where erosion would remove all pixels.
+        interior = cv2.erode(
+            region.astype(np.uint8),
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                      (2 * p["interior_erosion"] + 1,
+                                       2 * p["interior_erosion"] + 1)),
+        ).astype(bool)
+        if int(interior.sum()) < 12:
+            interior = region
+        ys, xs = np.nonzero(interior)
+        # A local background sampled from the smooth field avoids confusing a
+        # globally dark image with a dark cell.
+        centre = float(np.median(img[interior]))
+        bg = float(np.median(local_bg[interior]))
+        # Robust texture estimate; the global MAD provides the camera-noise
+        # scale and is never allowed to become zero.
+        tex = float(np.median(np.abs(residual[interior])))
+        darkness.append(max(0.0, bg - centre))
+        texture.append(tex)
+        labels_for_props.append(label)
+
+    if len(labels_for_props) < p["min_cells"]:
+        return set()
+
+    def robust_z(values):
+        arr = np.asarray(values, dtype=np.float32)
+        med = float(np.median(arr))
+        mad = float(np.median(np.abs(arr - med)))
+        scale = max(1.4826 * mad, 1.0)
+        return (arr - med) / scale
+
+    dark_z = robust_z(darkness)
+    tex_z = robust_z(texture)
+    # Requiring both features is important: a bright granular live nucleus or
+    # a smooth dark halo alone is not sufficient evidence of death.
+    score = 0.6 * dark_z + 0.4 * tex_z
+    dead = (dark_z >= p["min_darkness"]
+            ) & (tex_z >= p["min_texture"]
+                 ) & (score >= p["min_score"])
+    return {label for label, is_dead in zip(labels_for_props, dead) if is_dead}
 
 
 def _robust_background(image):

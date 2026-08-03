@@ -10,6 +10,7 @@
     <div class="header">
         <h1>Zeiss CZI 自动细胞计数</h1>
         <p>拖拽 .czi 文件或文件夹 — 自动分析明场/荧光细胞图 — 一键批量出结果</p>
+        <button class="app-exit" type="button" onclick="shutdownApp()">退出程序</button>
     </div>
     <div class="container">
 
@@ -31,11 +32,15 @@
                 </div>
                 <div class="drop-zone-hint">支持多文件、文件夹批量导入 · 蔡司原生格式直读</div>
             </div>
-            <div id="fileList" class="file-list hidden"></div>
-            <div id="channelArea" class="hidden"></div>
             <div id="processArea" class="hidden mt-16">
+                <div class="process-toolbar-copy">
+                    <strong>文件已准备好</strong>
+                    <span>确认下方文件顺序后即可开始批量识别</span>
+                </div>
                 <button class="btn btn-primary" id="btnProcess" onclick="startProcess()">开始批量识别计数</button>
             </div>
+            <div id="fileList" class="file-list hidden"></div>
+            <div id="channelArea" class="hidden"></div>
         </div>
 
         <!-- Step 2: Progress -->
